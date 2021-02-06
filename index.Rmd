@@ -1,0 +1,462 @@
+---
+title: ''
+author: "Max Serna"
+output: 
+  rmdformats::robobook:
+   number_sections: TRUE
+
+---
+<div style="margin-bottom:50px;">
+
+</div>
+
+<style type="text/css">
+
+.main-container {
+max-width: 70%;
+margin-left: auto;
+margin-right: auto;
+}
+
+body {
+font-size: 10pt;
+font-family: sans serif;
+text-align: justify;
+}
+
+h1 { /* Header 1 */
+font-size: 25px;
+color: black;
+}
+
+h2 { /* Header 2 */
+font-size: 18px;
+color: black;
+}
+
+</style>
+
+<div style="margin-bottom:30px;">
+<center>
+<p style="font-size:30pt">
+**Prediction Assignment Writeup**
+</p>
+##### Max Serna
+##### Practical Machine Learning at Coursera, by Johns Hopkins University
+##### February 6, 2021.
+</center>
+</div>
+
+***
+
+# Introduction
+This is the course project for JHU Practical Machine Learning course at Coursera, part of their Specialization in Data Science. The goal of this assignment project is to predict the manner in which 6 people exercised (wheter it was "correctly" or "incorrectly"), as we will describe in the following section. This is the "classe" variable in the training set.
+
+This document was made using R, RStudio and R Markdown. It is constructed as follows: First there is a background section that briefly describes the goal of this project and where the data comes from. Section 3 summarizes the R packages used for this project. Section 4 is about all the loading, cleaning and preprocess necessary to work with the data, including a Principal Components Analysis (PCA). In section 5, we present the Random Forests model trained to fit the data. Section 6 is about predicting using the testing set, and evaluate the results. Section 7 presents a variable importance plot of our model. Finally, in section 8 we just show the code necessary to predict with the data from the Quiz.
+
+# Background
+Using devices such as *Jawbone Up*, *Nike FuelBand*, and *Fitbit* it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is to quantify how  much of a particular activity they do, but they rarely quantify how well they do it. In this project, our goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants, and to predict the manner in which they did the exercise. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways.
+
+The data for this project come from this [source](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har).
+
+# Libraries
+To begin, we'll load into RStudio the following libraries: `caret`, which has several functions that will help us to streamline the building of our model and its evaluation; `parallel` and `doParallel`, for conducting parallel processing; `tidyverse`, a package that contains multiple tools to wrangle and plot our data; `hrbrthemes`, which contains some nice plotting themes for `ggplot2`; and `vip` to produce variable importance plots. `DT` has tools to create interactive tables in R Markdown.
+```{r message=FALSE}
+library(caret)
+library(parallel)
+library(doParallel)
+library(tidyverse)
+library(hrbrthemes)
+library(vip)
+library(DT)
+```
+
+# Data processing
+We start by loading the data into R, then we slice it to obtain a *training* and a *testing* set. After we've done this, we'll look for zero and low variance predictors to remove them from our model, as well as variables that have too many `NA` values. Next, a correlation analysis among our predictors is to be conducted, so that we can consider a dimensionality reduction using PCA.
+In what follows, we'll go through each of the steps described before, following the same order.
+
+## Loading the data
+In particular, the training set is quite large, and loading it into R can take a while. To solve this, or at least to try to solve it, we're using the `fread()` function from the `data.table` library to make this faster, instead of using the regular `read.csv()` function. Then, since `fread()` outcome is an object of class `data.table` and `data.frame`, it is necessary convert it to `data.frame` only. This will allow us to treat it as we'd usually do with data frames in R. Next code performs these instructions
+```{r, cache=TRUE}
+training_raw <- data.table::fread('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv')
+training_raw <- as.data.frame(training_raw)
+quizTest <- read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv')
+dim(training_raw)
+dim(quizTest)
+```
+
+## Data partition
+We'll use the `training_raw` data frame downloaded before to obtain a training and a testing set. Regarding `quizTest`, it contains what we'll use for the prediction Quiz at Coursera; and since we don't have the `classe` variable in there, we cannot use it as a validation set. Nonetheless, all preprocess we make with the training and testing set, will also be made with it.
+
+Start by setting a seed, and then split the data into a training set (75%) and a testing set (25%). For convenience, the `classe` column will be converted to a factor variable in R.
+```{r}
+seed <- 2
+set.seed(seed)
+
+inTrain <- 
+  createDataPartition(
+    y = training_raw$classe,
+    p = 0.75,             # 75% training set
+    list = F
+  )
+
+training <- training_raw[inTrain,]
+testing <- training_raw[-inTrain,]
+
+training$classe <- as.factor(training$classe)
+testing$classe <- as.factor(testing$classe)
+
+# Remove identification variables (no usage for our analysis)
+
+training <- training[, -c(1:5)]
+testing <- testing[, -c(1:5)]
+quizTest <- quizTest[, -c(1:5)]
+```
+
+## Low variance predictors
+There are over 150 predictors in the training set, so to asses which ones are informative or useful for our model and which ones are not, we can analyze their variance. Recall that a near zero variance (NZV) predictor is the one that has very few unique values, following certain criteria and certain thresholds. For example, in order for a predictor to be flagged as a NZV, first the frequency of the most common value over the second most frequent value (called the "frequency ratio") must be above `freqCut`. Secondly, the "percent of unique values", the number of unique values divided by the total number of samples (times 100), must also be below `uniqueCut`.
+
+Next code returns a data frame with predictor information.
+```{r cache=TRUE}
+NZVariables <- 
+  nearZeroVar(
+    training,
+    saveMetrics = T
+  )
+```
+```{r}
+datatable(
+  NZVariables,
+  options = list(
+    pageLength = 10
+  ),
+  filter = 'top',
+  class = 'stripe'
+)
+```
+In the first case of `new_window`, the predictor has `r length(unique(training$new_window))` unique values: `r sum(training$new_window=='yes')` observations of 'yes' and `r sum(training$new_window=='no')` of 'no'. 
+$$\frac{`r sum(training$new_window=='no')`}{`r sum(training$new_window=='yes')`} = `r sum(training$new_window=='no')/sum(training$new_window=='yes')`$$
+$$100*\frac{2}{`r nrow(training)`} = `r 2/nrow(training)*100`$$
+Last two calculated values correspond to `freqRatio` and `percentUnique`, correspondingly; we calculated them following the instructions from the first paragraph of this subsection. `nearZeroVar()` calculates those values for all predictors. Default thresholds are `freqCut = 95/5` and `uniqueCut = 10`. If the two conditions described previously are met, then the predictor is flagged as having NZV. If instead it only has 1 unique value, then it is considered to have zero variance (`freqRatio` = 1). A predictor that has a `freqRatio` of zero is has NA as its first or second most common unique value.
+
+Let's assume that all zero and near zero variance predictors won't provide any useful information for our purposes. This can be wrong in some cases, but we'll take the risk for the sake of simplicity. Having said this, we run next code to throw away those predictors.
+```{r cache=TRUE}
+NZVariables <- nearZeroVar(training)
+training <- training[, -NZVariables]
+testing <- testing[, -NZVariables]
+quizTest <- quizTest[, -NZVariables]
+```
+
+## Managing NA values
+The following code builds a table containing the proportion of NA values in each of the predictors. The table is in descending order, and as shown by it, the first 61-70 variables have a large proportion of NAs.
+```{r}
+naPercent <- 
+  data.frame(
+    sort(
+      colMeans(
+        is.na(
+          training
+        )
+      ),
+      decreasing = TRUE
+    )
+  )
+datatable(
+  naPercent,
+  options = list(
+    pageLength = 10
+  ),
+  colnames = '% of NA values',
+  filter = 'top',
+  class = 'stripe'
+)
+```
+
+We cannot impute over too many NA values, and specially not over 90% for over 60 predictors. For this reason, we're not using those in our model, and will be removed from all data sets in this project.
+```{r}
+tooManyNA <- which(colMeans(is.na(training))>.9)
+
+training <- training[, -tooManyNA]
+testing <- testing[, -tooManyNA]
+quizTest <- quizTest[, -tooManyNA]
+```
+
+## Correlation analysis among predictors
+This step is about finding those predictors that are highly correlated among each other. Next code will show us those correlation coefficients that are higher than 70%, as well as how many predictors present them.
+```{r}
+M <- abs(cor(training[,-54]))
+diag(M) <- 0
+# Which variables have a correlation higher than 70%
+cols <- which(M > 0.7, arr.ind = T)
+# Correlation coefficient of those predictors
+sort(unique(M[cols]))
+
+cols <- unique(as.numeric(cols))
+# How many variables?
+length(cols)
+```
+
+As seen before, 35 of our predictors present high correlation coefficients with other variables. Next subsection is about obtaining fewer variables that capture most of the variance contained in those predictors.
+
+## Principal Components Analysis (PCA)
+It is possible to perform a PCA on those 35 predictors which we found to be highly correlated. Next code creates a table containing the standard deviation of each component, as well as the proportion of variance explained by each of them and their cumulative proportion.
+```{r}
+pComp <- prcomp(training[, cols])
+
+# Check proportion of variance explained
+datatable(
+  t(summary(pComp)$importance),
+  options = list(
+    pageLength = 10
+  ),
+  filter = 'top',
+  class = 'stripe'
+)
+
+```
+
+We'll stick with PC 1-5, which explain up to `r scales::percent(t(summary(pComp)$importance)[5, 3], .01)` of the variance.
+Next code puts in a more visual perspective what we mean by this:
+```{r cache=TRUE}
+# Calculate variance explained manually
+exPvar <- pComp$sdev^2 / sum(pComp$sdev^2)
+head(exPvar)
+
+# Stick with PC1-5
+exPvar <- exPvar[1:5]
+
+# Calculate cumulative explained variance
+cumExpVar <- cumsum(exPvar)
+cumExpVar # PC 1 to 5 explain up to 91% of the variance from 35 predictors
+cumExpVar <- data.frame(Cumulative = cumExpVar,
+                        PrincipalComponent = paste0('PC', 1:5))
+cumExpVar %>% 
+  ggplot(
+    aes(
+      x = PrincipalComponent,
+      y = Cumulative,
+      group = 1
+    )
+  ) +
+  geom_line(
+    colour = 'grey',
+    size = 1
+  ) +
+  geom_point(
+    shape = 21,
+    color = "black",
+    fill = "orange",
+    size = 5
+  ) +
+  geom_text(
+    aes(
+      label = scales::percent(round(Cumulative, 3))),
+    hjust = c(.7, 1, 1, .5, .5),
+    vjust = c(-1.5, -1, -1, -1, 2),
+    size = 3.3,
+    fontface = 'bold'
+  ) +
+  theme_ipsum() +
+  ggtitle("Total variance explained (cumulative %)")
+```
+
+Finally, it is just left to preprocess all of our data sets using the object `pproc` created in the next chunk of code. Note that it's being created using the training set, and we apply it to transform both that set and the testing ones.
+```{r}
+pproc <- 
+  preProcess(
+    training[, cols],
+    method = 'pca',
+    pcaComp = 5
+  )
+
+trainPC <- training[, -cols]
+trainPC <- 
+  cbind(
+    trainPC,
+    predict(
+      pproc,
+      training[, cols]
+    )
+  )
+testingPCA <- testing[, -cols]
+testingPCA <- 
+  cbind(
+    testingPCA,
+    predict(
+      pproc,              # Same as in training
+      testing[, cols]
+    )
+  )
+```
+
+Having conducted all necessary preprocess to our data, we can work now with a training set composed of `r ncol(trainPC)` predictors, rather than the 160 originally contained in it. This dimensionality reduction can be advantageous for our model and all computations. We're now ready to build a classifier.
+
+# Model building: Random Forest
+A Random Forest model was selected to fit the data. No other model was fitted since `rf` provided really good results.
+
+The only parameter that is going to be tuned this time, is the number of randomly selected variables to use in each split of the trees, which is going to be done with `expand.grid(.mtry)`.
+
+Next, we'll parallelize the process of training the Random Forest model, in order to speed things up. All `r detectCores()` cores from the computer used to run this will be used. The following code uses `detectCores()` to detect the number of CPU cores on the current host; `makeCluster()` creates copies of `R` running in parallel; and `registerDoParallel()` will register the clusters created with the previously mentioned function. We then just set the seed for reproducibility and train our model. In this case, a cross-validation method consisting of 5 folds. Finally, we just close the parallel connection using `stopCluster()`.
+```{r cache=TRUE}
+tuneGrid <- 
+  expand.grid(
+    .mtry = c(23, 18, 14,
+              11, 9, 6,
+              3
+    )
+  )
+cores <- detectCores()
+cl <- makeCluster(cores) 
+registerDoParallel(cl)
+set.seed(seed)
+modelFit <- 
+  train(
+    classe ~ .,
+    data = trainPC, 
+    tuneGrid = tuneGrid,
+    method = 'rf',
+    trControl = trainControl(
+      allowParallel = T,
+      method = 'cv',
+      number = 5)
+  )
+on.exit(stopCluster(cl))
+registerDoSEQ()
+```
+
+Let's take a look at the results:
+```{r}
+modelFit
+```
+Our model training selected a tuning parameter `mtry` of `r modelFit$bestTune$mtry`; that is, the number of randomly chosen variables at each split when growing our trees. Cross-validation results show that this parameter provided the best accuracy (`r max(modelFit$results$Accuracy)`).
+
+Next plot helps visualizing our results:
+```{r cache=TRUE}
+modelFit$results %>% 
+  ggplot(
+    aes(
+      x = mtry,
+      y = Accuracy
+    )
+  ) +
+  geom_line(
+    colour = 'grey',
+    size = 1
+  ) +
+  geom_point(
+    shape = 21,
+    color = "black",
+    fill = "orange",
+    size = 5
+  ) +
+  geom_text(
+    aes(
+      label = paste('mtry =', modelFit$results$mtry)),
+    hjust = c(-.3, -.3, 1.3, -.3, -.1, -.3, 1.2),
+    vjust = c(-.5, .5, .7, -.5, 2, 1, 1),
+    size = 2.7,
+    fontface = 'bold'
+  ) +
+  theme_ipsum() +
+  ggtitle("mtry vs Accuracy")
+```
+
+# Predicting with testing set
+Having our model already trained, it is time to use the testing set to make predictions with it and evaluate its performance. For doing this, we construct a confusion matrix and see what the accuracy of our predictions is:
+```{r cache=TRUE}
+# Predicting on testing set -----------------------------------------------
+confM <- 
+  confusionMatrix(
+    predict(
+      modelFit,
+      testingPCA
+    ),
+    testingPCA$classe
+  )
+confM
+```
+
+Next we can plot the matrix using `ggplot2` functions:
+```{r}
+ggplot(
+  as.data.frame(confM$table),
+  aes(
+    Prediction,
+    sort(
+      Reference,
+      decreasing = T),
+    fill = Freq
+  )
+) +
+  geom_tile() + 
+  geom_text(
+    aes(
+      label = Freq
+    )
+  ) +
+  scale_fill_gradient(
+    low = "white",
+    high = "orange"
+  ) +
+  labs(
+    x = "Actual",
+    y = "Predicted",
+    subtitle = paste('Accuracy =', round(confM$overall[1], 6))
+  ) +
+  scale_x_discrete(
+    labels = c('A', 'B', 'C', 'D', 'E'),
+    position = 'top'
+  ) +
+  scale_y_discrete(
+    labels = rev(c('A', 'B', 'C', 'D', 'E'))
+  ) +
+  theme_ipsum() +
+  theme(axis.text.x = 
+          element_text(
+            face = "bold",
+            size = 12,
+            color = 'black'
+          ),
+        axis.text.y = 
+          element_text(
+            face = "bold",
+            size = 12,
+            color = 'black'
+          )
+  ) +
+  ggtitle('Confusion matrix for testing set')
+```
+Classification seems to be quite good, having a really high accuracy even with the testing set.
+
+# Variable importance
+Finally, we can analyze the importance of each of the predictors used in this model. We can use `vip()` for plotting the results located in `modelFit` that will help us in this matter.
+```{r}
+vip(
+  modelFit,
+  num_features = ncol(trainPC)-1,
+  # geom = "point",
+  aesthetics = list(
+    color = 'black',
+    fill = topo.colors(ncol(trainPC)-1),
+    size = 1
+  )
+) +
+  theme_ipsum()
+```
+Interestingly, we can find that three of our calculated Principal Components (PC1, PC2 and PC3) are in the top 10 predictors by importance in our model. This finding suggests that the PCA we conducted provides good support to our predictions, and not only an improvement in computation and a reduction of dimensionality.
+
+# Quiz predictions
+The following chunk of code computes the predictions for the quiz test. For obvious reasons , we're not showing the results in this section, just the code.
+```{r results='hide'}
+quizTestPCA <- quizTest[, -cols]
+quizTestPCA <- 
+  cbind(
+    quizTestPCA,
+    predict(
+      pproc,
+      quizTest[, cols]
+    )
+  )
+predict(modelFit, quizTestPCA)
+```
+
